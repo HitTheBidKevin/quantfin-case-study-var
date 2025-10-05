@@ -22,9 +22,11 @@ Date: 2025/10/03
 """
 
 from src.data_loader import download_prices
+from src.risk_metrics import calculate_historical_var, rolling_historical_var
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
 
 def main():
     tickers_input = input("Enter ticker symbols separated by commas (e.g. SPY,AGG): ")
@@ -52,57 +54,35 @@ def main():
         return
 
     returns = prices.pct_change().dropna()
-    portfolio_returns = (returns * weights).sum(axis=1)
+
     confidence_levels = [0.90, 0.95, 0.99]
     weights_percent = [f"{tickers[i]} {weights[i]*100:.1f}%" for i in range(len(tickers))]
     portfolio_str = ", ".join(weights_percent)
 
     if method == 'R':
         window_years = int(input("Enter rolling window in years (e.g., 2): "))
-        years_series = pd.Series(portfolio_returns.index.year, index=portfolio_returns.index)
-        min_year, max_year = years_series.min(), years_series.max()
-        results = {cl: [] for cl in confidence_levels}
-        window_end_labels = []
 
-        for start_year in range(min_year, max_year - window_years + 2):
-            start_date = pd.Timestamp(f"{start_year}-01-01")
-            end_year = start_year + window_years - 1
-            if end_year < max_year:
-                end_date = pd.Timestamp(f"{end_year}-12-31")
-                if end_date not in portfolio_returns.index:
-                    mask = portfolio_returns.index.year == end_year
-                    if not mask.any():
-                        continue
-                    end_date = portfolio_returns.index[mask][-1]
-            else:
-                end_date = portfolio_returns.index[-1]
+        rolling_vars = {}
+        for cl in confidence_levels:
+            rolling_vars[cl] = rolling_historical_var(returns, weights, window_years, confidence_level=cl)
 
-            window_data = portfolio_returns[(portfolio_returns.index >= start_date) & (portfolio_returns.index <= end_date)]
-            if len(window_data) < 30:
-                continue
-
-            window_end_labels.append(str(end_date.date()))
-            for cl in confidence_levels:
-                var = -np.percentile(window_data, (1 - cl) * 100)
-                results[cl].append(var)
-
+        # Print results similar to original format
         print("\nCalendar-Aligned Rolling VaR:")
-        for i, end_str in enumerate(window_end_labels):
-            print(f"{end_str}: " + ", ".join([f"VaR {int(cl*100)}% = {results[cl][i]*100:.2f}%" for cl in confidence_levels]))
+        for date in rolling_vars[confidence_levels[0]].index:
+            print(f"{date.date()}: " + ", ".join([f"VaR {int(cl*100)}% = {rolling_vars[cl][date]*100:.2f}%" for cl in confidence_levels]))
 
         plt.figure(figsize=(12, 6))
         ax1 = plt.gca()
         ax2 = ax1.twinx()
 
         for cl in confidence_levels:
-            var_pct = [v * 100 for v in results[cl]]
-            var_pnl = [v * portfolio_value for v in results[cl]]
-            ax1.plot(window_end_labels, var_pct, marker='o', label=f'VaR {int(cl*100)}%')
-            ax2.plot(window_end_labels, var_pnl, marker='x', linestyle='--', label=f'PnL VaR {int(cl*100)}%')
-
-            # Annotate PnL VaR near each point
-            for x, y in zip(window_end_labels, var_pnl):
-                ax2.annotate(f"{y:.2f}", (x, y), textcoords="offset points", xytext=(0,5),
+            var_pct = rolling_vars[cl] * 100
+            var_pnl = rolling_vars[cl] * portfolio_value
+            ax1.plot(rolling_vars[cl].index, var_pct, marker='o', label=f'VaR {int(cl*100)}%')
+            ax2.plot(rolling_vars[cl].index, var_pnl, marker='x', linestyle='--', label=f'PnL VaR {int(cl*100)}%')
+            for x, y, pct in zip(rolling_vars[cl].index, var_pnl, var_pct):
+                # Annotate PnL VaR with % VaR next to it
+                ax2.annotate(f"{y:.2f}\n({pct:.2f}%)", (x, y), textcoords="offset points", xytext=(0,5),
                              ha='center', fontsize=8, color='tab:blue')
 
         ax1.set_ylabel("VaR (%)")
@@ -118,23 +98,24 @@ def main():
         plt.show()
 
     elif method == 'W':
+        portfolio_returns = (returns * weights).sum(axis=1)
         print("\nWhole period VaR:")
         for cl in confidence_levels:
-            var = -np.percentile(portfolio_returns, (1 - cl) * 100)
+            var = calculate_historical_var(portfolio_returns, cl)
             pnl = var * portfolio_value
             print(f"VaR {int(cl*100)}%: {var*100:.2f}%, Portfolio PnL: {pnl:.2f}")
 
         plt.figure(figsize=(8, 6))
         bars = plt.bar([f"VaR {int(c*100)}%" for c in confidence_levels],
-                       [v*100 for v in [ -np.percentile(portfolio_returns, (1 - c) * 100) for c in confidence_levels ]])
+                       [calculate_historical_var(portfolio_returns, c) * 100 for c in confidence_levels])
         plt.ylabel("VaR (%)")
         plt.title(f"Full Period VaR - Portfolio: {portfolio_str}")
 
-        # Plot PnL VaR values on top of bars
         for bar, cl in zip(bars, confidence_levels):
             height = bar.get_height()
-            pnl = -np.percentile(portfolio_returns, (1 - cl) * 100) * portfolio_value
-            plt.annotate(f"{pnl:.2f}",
+            pnl = calculate_historical_var(portfolio_returns, cl) * portfolio_value
+            pct = calculate_historical_var(portfolio_returns, cl) * 100
+            plt.annotate(f"{pnl:.2f}\n({pct:.2f}%)",
                          xy=(bar.get_x() + bar.get_width() / 2, height),
                          xytext=(0, 3),
                          textcoords="offset points",
@@ -143,6 +124,7 @@ def main():
         plt.show()
     else:
         print("Invalid selection.")
+
 
 if __name__ == "__main__":
     main()
